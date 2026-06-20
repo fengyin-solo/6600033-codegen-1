@@ -1,5 +1,31 @@
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
+
+const STORAGE_KEYS = {
+  PLANS: 'mc_experiment_plans',
+  CURRENT_PLAN_ID: 'mc_current_plan_id',
+  BATCH_RESULTS: 'mc_batch_results',
+  BATCH_COUNT: 'mc_batch_count'
+}
+
+function loadFromStorage<T>(key: string, defaultValue: T): T {
+  try {
+    const raw = localStorage.getItem(key)
+    if (!raw) return defaultValue
+    return JSON.parse(raw) as T
+  } catch (e) {
+    console.warn(`Failed to load ${key} from localStorage:`, e)
+    return defaultValue
+  }
+}
+
+function saveToStorage(key: string, value: unknown) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value))
+  } catch (e) {
+    console.warn(`Failed to save ${key} to localStorage:`, e)
+  }
+}
 
 export interface MCScenario {
   id: string
@@ -169,12 +195,35 @@ export const useMCStore = defineStore('mc', () => {
   const testResult = ref<HypTestResult | null>(null)
   const isRunning = ref(false)
 
-  const plans = ref<ExperimentPlan[]>([])
-  const currentPlan = ref<ExperimentPlan | null>(null)
-  const batchResults = ref<BatchResult[]>([])
+  const savedPlans = loadFromStorage<ExperimentPlan[]>(STORAGE_KEYS.PLANS, [])
+  const savedCurrentPlanId = loadFromStorage<string | null>(STORAGE_KEYS.CURRENT_PLAN_ID, null)
+  const savedBatchResults = loadFromStorage<BatchResult[]>(STORAGE_KEYS.BATCH_RESULTS, [])
+  const savedBatchCount = loadFromStorage<number>(STORAGE_KEYS.BATCH_COUNT, 3)
+
+  const plans = ref<ExperimentPlan[]>(savedPlans)
+  const currentPlan = ref<ExperimentPlan | null>(
+    savedCurrentPlanId ? savedPlans.find(p => p.id === savedCurrentPlanId) || null : null
+  )
+  const batchResults = ref<BatchResult[]>(savedBatchResults)
   const isBatchRunning = ref(false)
   const currentBatchIndex = ref(0)
-  const batchCount = ref(3)
+  const batchCount = ref(savedBatchCount)
+
+  watch(plans, (val) => {
+    saveToStorage(STORAGE_KEYS.PLANS, val)
+  }, { deep: true })
+
+  watch(currentPlan, (val) => {
+    saveToStorage(STORAGE_KEYS.CURRENT_PLAN_ID, val?.id || null)
+  }, { deep: true })
+
+  watch(batchResults, (val) => {
+    saveToStorage(STORAGE_KEYS.BATCH_RESULTS, val)
+  }, { deep: true })
+
+  watch(batchCount, (val) => {
+    saveToStorage(STORAGE_KEYS.BATCH_COUNT, val)
+  })
 
   function runSimulation() {
     isRunning.value = true

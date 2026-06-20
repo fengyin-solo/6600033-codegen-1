@@ -112,8 +112,8 @@
                 <p class="text-xs text-slate-500">{{ store.currentPlan.description }}</p>
               </div>
               <div class="flex gap-2">
-                <label class="text-xs text-slate-500 mr-2 self-center">批次: {{ batchCount }}</label>
-                <input type="range" min="1" max="10" step="1" v-model.number="batchCount" class="w-24 accent-emerald-500 self-center" />
+                <label class="text-xs text-slate-500 mr-2 self-center">批次: {{ store.batchCount }}</label>
+                <input type="range" min="1" max="10" step="1" v-model.number="store.batchCount" class="w-24 accent-emerald-500 self-center" />
                 <button @click="runExperiment" :disabled="store.isBatchRunning || store.currentPlan.steps.length === 0" class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 rounded text-sm font-bold">
                   {{ store.isBatchRunning ? `运行中 ${store.currentBatchIndex + 1}/${store.batchCount}` : '▶ 开始实验' }}
                 </button>
@@ -259,11 +259,16 @@ const comparisonChartRef = ref<HTMLDivElement | null>(null)
 const group1Input = ref('5.1,4.8,5.3,4.9,5.2,5.0,4.7,5.1,5.4,4.8')
 const group2Input = ref('4.6,4.2,4.9,4.3,4.5,4.7,4.4,4.8,4.1,4.6')
 
-const activeTab = ref<'simulation' | 'experiment'>('simulation')
+const activeTab = ref<'simulation' | 'experiment'>(
+  (localStorage.getItem('mc_active_tab') as 'simulation' | 'experiment') || 'simulation'
+)
 const showNewPlanModal = ref(false)
 const newPlanName = ref('')
 const newPlanDesc = ref('')
-const batchCount = ref(3)
+
+watch(activeTab, (val) => {
+  localStorage.setItem('mc_active_tab', val)
+})
 
 let convChart: echarts.ECharts | null = null
 let histChart: echarts.ECharts | null = null
@@ -385,7 +390,7 @@ function updateStepParam(stepId: string, key: string, value: number) {
 
 async function runExperiment() {
   if (!store.currentPlan || store.currentPlan.steps.length === 0) return
-  await store.runExperimentBatch(store.currentPlan, batchCount.value)
+  await store.runExperimentBatch(store.currentPlan, store.batchCount)
   await nextTick()
   initComparisonChart()
   updateComparisonChart()
