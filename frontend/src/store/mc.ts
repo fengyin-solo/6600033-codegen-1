@@ -28,6 +28,51 @@ export interface HypTestResult {
   df?: number
 }
 
+export interface ExperimentStep {
+  id: string
+  scenarioId: string
+  iterations: number
+  params: Record<string, number>
+  order: number
+}
+
+export interface ExperimentPlan {
+  id: string
+  name: string
+  description: string
+  steps: ExperimentStep[]
+  createdAt: number
+  updatedAt: number
+}
+
+export interface BatchResult {
+  batchId: string
+  batchName: string
+  stepId: string
+  scenarioId: string
+  scenarioName: string
+  result: MCResult
+  runAt: number
+  duration: number
+}
+
+export interface ExperimentConclusion {
+  bestScenario: string
+  averageEstimate: number
+  totalRuns: number
+  summary: string
+  details: Record<string, { avg: number; min: number; max: number; std: number }>
+}
+
+export interface ExperimentState {
+  plans: ExperimentPlan[]
+  currentPlan: ExperimentPlan | null
+  batchResults: BatchResult[]
+  isBatchRunning: boolean
+  currentBatchIndex: number
+  batchCount: number
+}
+
 function normalRandom(): number {
   let u = 0, v = 0
   while (u === 0) u = Math.random()
@@ -106,6 +151,17 @@ export const SCENARIOS: MCScenario[] = [
   { id: 'gambler', name: '赌徒破产', description: '不利赌局下资金耗尽概率估算', params: { p: 0.45, bankroll: 50, goal: 100 }, category: '概率' }
 ]
 
+function genId(): string {
+  return Math.random().toString(36).substring(2, 10) + Date.now().toString(36)
+}
+
+function calcStats(values: number[]): { avg: number; min: number; max: number; std: number } {
+  if (values.length === 0) return { avg: 0, min: 0, max: 0, std: 0 }
+  const avg = values.reduce((a, b) => a + b, 0) / values.length
+  const variance = values.reduce((s, v) => s + (v - avg) ** 2, 0) / values.length
+  return { avg, min: Math.min(...values), max: Math.max(...values), std: Math.sqrt(variance) }
+}
+
 export const useMCStore = defineStore('mc', () => {
   const currentScenario = ref<MCScenario>(SCENARIOS[0])
   const iterations = ref(1000)
@@ -113,10 +169,197 @@ export const useMCStore = defineStore('mc', () => {
   const testResult = ref<HypTestResult | null>(null)
   const isRunning = ref(false)
 
+  const plans = ref<ExperimentPlan[]>([])
+  const currentPlan = ref<ExperimentPlan | null>(null)
+  const batchResults = ref<BatchResult[]>([])
+  const isBatchRunning = ref(false)
+  const currentBatchIndex = ref(0)
+  const batchCount = ref(3)
+
   function runSimulation() {
     isRunning.value = true
     setTimeout(() => { result.value = runMC(currentScenario.value, iterations.value); isRunning.value = false }, 10)
   }
+
+  function createPlan(name: string, description: string): ExperimentPlan {
+    const plan: ExperimentPlan = {
+      id: genId(),
+      name,
+      description,
+      steps: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    }
+    plans.value.push(plan)
+    return plan
+  }
+
+  function setCurrentPlan(plan: ExperimentPlan | null) {
+    currentPlan.value = plan
+  }
+
+  function addStep(planId: string, scenarioId: string, customIterations?: number, customParams?: Record<string, number>) {
+    const plan = plans.value.find(p => p.id === planId)
+    if (!plan) return
+    const scenario = SCENARIOS.find(s => s.id === scenarioId)
+    if (!scenario) return
+    const step: ExperimentStep = {
+      id: genId(),
+      scenarioId,
+      iterations: customIterations || iterations.value,
+      params: customParams ? { ...scenario.params, ...customParams } : { ...scenario.params },
+      order: plan.steps.length
+    }
+    plan.steps.push(step)
+    plan.updatedAt = Date.now()
+  }
+
+  function removeStep(planId: string, stepId: string) {
+    const plan = plans.value.find(p => p.id === planId)
+    if (!plan) return
+    plan.steps = plan.steps.filter(s => s.id !== stepId)
+    plan.steps.forEach((s, i) => s.order = i)
+    plan.updatedAt = Date.now()
+  }
+
+  function updateStep(planId: string, stepId: string, updates: Partial<ExperimentStep>) {
+    const plan = plans.value.find(p => p.id === planId)
+    if (!plan) return
+    const step = plan.steps.find(s => s.id === stepId)
+    if (!step) return
+    Object.assign(step, updates)
+    plan.updatedAt = Date.now()
+  }
+
+  function reorderStep(planId: string, stepId: string, newOrder: number) {
+    const plan = plans.value.find(p => p.id === planId)
+    if (!plan) return
+    const stepIdx = plan.steps.findIndex(s => s.id === stepId)
+    if (stepIdx === -1) return
+    const [step] = plan.steps.splice(stepIdx, 1)
+    plan.steps.splice(Math.max(0, Math.min(newOrder, plan.steps.length)), 0, step)
+    plan.steps.forEach((s, i) => s.order = i)
+    plan.updatedAt = Date.now()
+  }
+
+  function deletePlan(planId: string) {
+    plans.value = plans.value.filter(p => p.id !== planId)
+    if (currentPlan.value?.id === planId) currentPlan.value = null
+  }
+
+  async function runExperimentBatch(plan: ExperimentPlan, batches: number = 3): Promise<BatchResult[]> {
+    isBatchRunning.value = true
+    currentBatchIndex.value = 0
+    batchCount.value = batches
+    const results: BatchResult[] = []
+
+    for (let b = 0; b < batches; b++) {
+      currentBatchIndex.value = b
+      for (const step of plan.steps) {
+        const scenario = SCENARIOS.find(s => s.id === step.scenarioId)
+        if (!scenario) continue
+
+        const fullScenario: MCScenario = { ...scenario, params: step.params }
+        const start = performance.now()
+        const mcResult = runMC(fullScenario, step.iterations)
+        const duration = performance.now() - start
+
+        results.push({
+          batchId: `batch_${b}`,
+          batchName: `第${b + 1}批`,
+          stepId: step.id,
+          scenarioId: step.scenarioId,
+          scenarioName: scenario.name,
+          result: mcResult,
+          runAt: Date.now(),
+          duration
+        })
+
+        await new Promise(r => setTimeout(r, 50))
+      }
+    }
+
+    batchResults.value = results
+    isBatchRunning.value = false
+    return results
+  }
+
+  function clearBatchResults() {
+    batchResults.value = []
+  }
+
+  function getScenarioStats(scenarioId: string) {
+    const estimates = batchResults.value
+      .filter(r => r.scenarioId === scenarioId)
+      .map(r => r.result.estimate)
+    return calcStats(estimates)
+  }
+
+  const experimentConclusion = computed((): ExperimentConclusion | null => {
+    if (batchResults.value.length === 0) return null
+
+    const grouped = new Map<string, number[]>()
+    batchResults.value.forEach(r => {
+      if (!grouped.has(r.scenarioId)) grouped.set(r.scenarioId, [])
+      grouped.get(r.scenarioId)!.push(r.result.estimate)
+    })
+
+    const details: Record<string, { avg: number; min: number; max: number; std: number }> = {}
+    let bestScenario = ''
+    let lowestError = Infinity
+
+    grouped.forEach((estimates, sid) => {
+      const stats = calcStats(estimates)
+      details[sid] = stats
+      const scenario = SCENARIOS.find(s => s.id === sid)
+      if (scenario && 'trueValue' in batchResults.value.find(r => r.scenarioId === sid)!.result) {
+        const trueVal = batchResults.value.find(r => r.scenarioId === sid)!.result.trueValue!
+        const err = Math.abs(stats.avg - trueVal)
+        if (err < lowestError) {
+          lowestError = err
+          bestScenario = scenario.name
+        }
+      }
+    })
+
+    const allEstimates = batchResults.value.map(r => r.result.estimate)
+    const avgEstimate = allEstimates.reduce((a, b) => a + b, 0) / allEstimates.length
+    const uniqueScenarios = new Set(batchResults.value.map(r => r.scenarioName))
+
+    return {
+      bestScenario: bestScenario || Array.from(uniqueScenarios)[0],
+      averageEstimate: avgEstimate,
+      totalRuns: batchResults.value.length,
+      summary: `共执行 ${batchResults.value.length} 次模拟，涉及 ${uniqueScenarios.size} 种场景，平均估算值 ${avgEstimate.toFixed(6)}`,
+      details
+    }
+  })
+
+  const groupedBatchResults = computed(() => {
+    const groups = new Map<string, BatchResult[]>()
+    batchResults.value.forEach(r => {
+      const key = r.batchId
+      if (!groups.has(key)) groups.set(key, [])
+      groups.get(key)!.push(r)
+    })
+    return Array.from(groups.entries()).map(([batchId, results]) => ({ batchId, batchName: results[0]?.batchName || batchId, results }))
+  })
+
+  const scenarioComparisonData = computed(() => {
+    const scenarioIds = Array.from(new Set(batchResults.value.map(r => r.scenarioId)))
+    return scenarioIds.map(sid => {
+      const scenario = SCENARIOS.find(s => s.id === sid)
+      const results = batchResults.value.filter(r => r.scenarioId === sid)
+      const stats = getScenarioStats(sid)
+      return {
+        scenarioId: sid,
+        scenarioName: scenario?.name || sid,
+        runCount: results.length,
+        ...stats,
+        estimates: results.map(r => r.result.estimate)
+      }
+    })
+  })
 
   function runTest(g1: number[], g2: number[]) {
     const n1 = g1.length, n2 = g2.length
@@ -148,5 +391,13 @@ export const useMCStore = defineStore('mc', () => {
     return { xAxis: Array.from({ length: bins }, (_, i) => Math.round((mn + i * bs) * 100) / 100), data: counts }
   })
 
-  return { currentScenario, iterations, result, testResult, isRunning, convergenceData, histogramData, runSimulation, runTest, setScenario }
+  return {
+    currentScenario, iterations, result, testResult, isRunning,
+    plans, currentPlan, batchResults, isBatchRunning, currentBatchIndex, batchCount,
+    experimentConclusion, groupedBatchResults, scenarioComparisonData,
+    convergenceData, histogramData,
+    runSimulation, runTest, setScenario,
+    createPlan, setCurrentPlan, addStep, removeStep, updateStep, reorderStep, deletePlan,
+    runExperimentBatch, clearBatchResults, getScenarioStats
+  }
 })
